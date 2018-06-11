@@ -8,16 +8,20 @@ import datetime
 from io import BytesIO
 
 import numpy as np
+import numexpr as ne
 
 import mercantile
 
 import rasterio
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
+from rasterio.io import DatasetReader
 from rasterio.plot import reshape_as_image
 from rio_toa import reflectance, brightness_temp, toa_utils
 
-from rio_tiler.errors import (InvalidFormat,
+from rio_tiler import profiles as TileProfiles
+from rio_tiler.errors import (RioTilerError,
+                              InvalidFormat,
                               InvalidLandsatSceneId,
                               InvalidSentinelSceneId,
                               InvalidCBERSSceneId)
@@ -96,7 +100,7 @@ def band_min_max_worker(address, pmin=2, pmax=98, width=1024, height=1024):
     Attributes
     ----------
 
-    address : Sentinel-2 band AWS address
+    address : Image band URL
     pmin : Histogram minimum cut (default: 2)
     pmax : Histogram maximum cut (default: 98)
     width : int, optional (default: 1024)
@@ -117,19 +121,21 @@ def band_min_max_worker(address, pmin=2, pmax=98, width=1024, height=1024):
     return np.percentile(arr[arr > 0], (pmin, pmax)).astype(np.int).tolist()
 
 
-def tile_band_worker(address, bounds, tilesize, indexes=[1], nodata=0):
-    """Read band data
+def tile_read(source, bounds, tilesize, indexes=[1], nodata=None, alpha=None):
+    """Read data and mask
 
     Attributes
     ----------
-
-    address : Sentinel-2/Landsat-8 band AWS address
+    source : str or rasterio.io.DatasetReader
+        input file path or rasterio.io.DatasetReader object
     bounds : Mercator tile bounds to retrieve
     tilesize : Output image size
     indexes : list of ints or a single int, optional, (default: 1)
         If `indexes` is a list, the result is a 3D array, but is
         a 2D array if it is a band index number.
-    nodata: int or float, optional (defaults: 0)
+    nodata: int or float, optional (defaults: None)
+    alpha: int, optional (defaults: None)
+        Force alphaband if not present in the dataset metadata
 
     Returns
     -------
@@ -138,26 +144,65 @@ def tile_band_worker(address, bounds, tilesize, indexes=[1], nodata=0):
     """
     w, s, e, n = bounds
 
-    out_shape = (tilesize, tilesize)
+    if alpha is not None and nodata is not None:
+        raise RioTilerError('cannot pass alpha and nodata option')
 
-    if not isinstance(indexes, int):
-        if len(indexes) == 1:
-            indexes = indexes[0]
-        else:
-            out_shape = (len(indexes),) + out_shape
+    if isinstance(indexes, int):
+        indexes = [indexes]
 
-    with rasterio.open(address) as src:
-        with WarpedVRT(src,
-                       dst_crs='EPSG:3857',
-                       resampling=Resampling.bilinear,
-                       src_nodata=nodata,
-                       dst_nodata=nodata) as vrt:
-                            window = vrt.window(w, s, e, n, precision=21)
-                            return vrt.read(window=window,
-                                            boundless=True,
-                                            resampling=Resampling.bilinear,
-                                            out_shape=out_shape,
-                                            indexes=indexes)
+    out_shape = (len(indexes), tilesize, tilesize)
+
+    vrt_params = dict(
+        dst_crs='EPSG:3857',
+        resampling=Resampling.bilinear,
+        src_nodata=nodata,
+        dst_nodata=nodata)
+
+    if isinstance(source, DatasetReader):
+        with WarpedVRT(source, **vrt_params) as vrt:
+            window = vrt.window(w, s, e, n, precision=21)
+            data = vrt.read(window=window,
+                            boundless=True,
+                            resampling=Resampling.bilinear,
+                            out_shape=out_shape,
+                            indexes=indexes)
+
+            if nodata is not None:
+                mask = np.all(data != nodata, axis=0).astype(np.uint8) * 255
+            elif alpha is not None:
+                mask = vrt.read(alpha, window=window,
+                                out_shape=(tilesize, tilesize),
+                                boundless=True,
+                                resampling=Resampling.bilinear)
+            else:
+                mask = vrt.read_masks(1, window=window,
+                                      out_shape=(tilesize, tilesize),
+                                      boundless=True,
+                                      resampling=Resampling.bilinear)
+    else:
+        with rasterio.open(source) as src:
+            with WarpedVRT(src, **vrt_params) as vrt:
+                window = vrt.window(w, s, e, n, precision=21)
+                data = vrt.read(window=window,
+                                boundless=True,
+                                resampling=Resampling.bilinear,
+                                out_shape=out_shape,
+                                indexes=indexes)
+
+                if nodata is not None:
+                    mask = np.all(data != nodata, axis=0).astype(np.uint8) * 255
+                elif alpha is not None:
+                    mask = vrt.read(alpha, window=window,
+                                    out_shape=(tilesize, tilesize),
+                                    boundless=True,
+                                    resampling=Resampling.bilinear)
+                else:
+                    mask = vrt.read_masks(1, window=window,
+                                          out_shape=(tilesize, tilesize),
+                                          boundless=True,
+                                          resampling=Resampling.bilinear)
+
+    return data, mask
 
 
 def linear_rescale(image, in_range=(0, 1), out_range=(1, 255)):
@@ -359,15 +404,14 @@ def sentinel_parse_scene_id(sceneid):
 def cbers_parse_scene_id(sceneid):
     """Parse CBERS scene id"""
 
-    if not re.match('^CBERS_4_MUX_[0-9]{8}_[0-9]{3}_[0-9]{3}_L[0-9]$', sceneid):
+    if not re.match('^CBERS_4_\w+_[0-9]{8}_[0-9]{3}_[0-9]{3}_L[0-9]$', sceneid):
         raise InvalidCBERSSceneId('Could not match {}'.format(sceneid))
 
     cbers_pattern = (
-        r'(?P<sensor>\w{5})'
+        r'(?P<satellite>\w+)_'
+        r'(?P<mission>[0-9]{1})'
         r'_'
-        r'(?P<satellite>[0-9]{1})'
-        r'_'
-        r'(?P<intrument>\w{3})'
+        r'(?P<instrument>\w+)'
         r'_'
         r'(?P<acquisitionYear>[0-9]{4})'
         r'(?P<acquisitionMonth>[0-9]{2})'
@@ -386,36 +430,57 @@ def cbers_parse_scene_id(sceneid):
 
     path = meta['path']
     row = meta['row']
-    meta['key'] = 'CBERS4/MUX/{}/{}/{}'.format(path, row, sceneid)
+    instrument = meta['instrument']
+    meta['key'] = 'CBERS4/{}/{}/{}/{}'.format(instrument, path, row, sceneid)
 
     meta['scene'] = sceneid
 
+    instrument_params = {
+        'MUX': {
+            'reference_band':'6',
+            'bands': ['5', '6', '7', '8'],
+            'rgb': (7, 6, 5)
+        },
+        'AWFI': {
+            'reference_band': '14',
+            'bands': ['13', '14', '15', '16'],
+            'rgb': (15, 14, 13)
+        },
+        'PAN10M': {
+            'reference_band': '4',
+            'bands': ['2', '3', '4'],
+            'rgb': (3, 4, 2)
+        },
+        'PAN5M': {
+            'reference_band': '1',
+            'bands': ['1'],
+            'rgb': (1, 1, 1)
+        }
+    }
+    meta['reference_band'] = instrument_params[instrument]['reference_band']
+    meta['bands'] = instrument_params[instrument]['bands']
+    meta['rgb'] = instrument_params[instrument]['rgb']
+    
     return meta
 
 
-def array_to_img(arr, tileformat='png', nodata=0, color_map=None):
+def array_to_img(arr, mask=None, color_map=None):
     """Convert an array to an base64 encoded img
 
     Attributes
     ----------
     arr : numpy ndarray
         Image array to encode.
-    tileformat : str (default: png)
-        Image format to return (Accepted: "jpg" or "png")
-    nodata: int
-        No data value used to create mask
+    Mask: numpy ndarray
+        Mask
     color_map: numpy array
         ColorMap array (see: utils.get_colormap)
 
     Returns
     -------
-    out : str
-        base64 encoded PNG or JPEG image.
+    img : object
+        Pillow image
     """
-
-    if tileformat not in ['png', 'jpg']:
-        raise InvalidFormat('Invalid {} extension'.format(tileformat))
-
     if arr.dtype != np.uint8:
         logger.error('Data casted to UINT8')
         arr = arr.astype(np.uint8)
@@ -427,31 +492,41 @@ def array_to_img(arr, tileformat='png', nodata=0, color_map=None):
     if len(arr.shape) != 2 and color_map:
         raise InvalidFormat('Cannot apply colormap on a multiband image')
 
-    if len(arr.shape) == 2:
-        mode = 'L'
-    else:
-        mode = 'RGB'
+    mode = 'L' if len(arr.shape) == 2 else 'RGB'
 
     img = Image.fromarray(arr, mode=mode)
     if color_map:
         img.putpalette(color_map)
 
-    sio = BytesIO()
-    if tileformat == 'jpg':
-        img.save(sio, 'jpeg', subsampling=0, quality=100)
-    else:
-        mask = np.full(arr.shape[0:2], 255, dtype=np.uint8)
-        if len(arr.shape) == 2:
-            arr = np.expand_dims(arr, axis=2)
-        if nodata is not None:
-            mask = np.all(arr != nodata, axis=2).astype(np.uint8) * 255
-
-        mask_img = Image.fromarray(mask)
+    if mask is not None:
+        mask_img = Image.fromarray(mask.astype(np.uint8))
         img.putalpha(mask_img)
-        img.save(sio, 'png', compress_level=0)
 
+    return img
+
+
+def b64_encode_img(img, tileformat):
+    """Convert a Pillow image to an base64 encoded string
+    Attributes
+    ----------
+    img : object
+        Pillow image
+    tileformat : str
+        Image format to return (Accepted: "jpg" or "png")
+
+    Returns
+    -------
+    out : str
+        base64 encoded image.
+    """
+    params = TileProfiles.get(tileformat)
+
+    if tileformat == 'jpeg':
+        img = img.convert('RGB')
+
+    sio = BytesIO()
+    img.save(sio, tileformat.upper(), **params)
     sio.seek(0)
-
     return base64.b64encode(sio.getvalue()).decode()
 
 
@@ -495,3 +570,30 @@ def mapzen_elevation_rgb(arr):
     g = (arr % 256)
     b = ((arr * 256) % 256)
     return np.stack([r, g, b]).astype(np.uint8)
+
+
+def expression(sceneid, tile_x, tile_y, tile_z, expr, **kwargs):
+    """
+    """
+    bands_names = tuple(set(re.findall(r'b(?P<bands>[0-9A]{1,2})', expr)))
+    rgb = expr.split(',')
+
+    if sceneid.startswith('L'):
+        from rio_tiler.landsat8 import tile
+        arr, mask = tile(sceneid,  tile_x, tile_y, tile_z, bands=bands_names, **kwargs)
+    elif sceneid.startswith('S2'):
+        from rio_tiler.sentinel2 import tile
+        arr, mask = tile(sceneid,  tile_x, tile_y, tile_z, bands=bands_names, **kwargs)
+    elif sceneid.startswith('CBERS'):
+        from rio_tiler.cbers import tile
+        arr, mask = tile(sceneid,  tile_x, tile_y, tile_z, bands=bands_names, **kwargs)
+    else:
+        from rio_tiler.main import tile
+        bands = tuple(map(int, bands_names))
+        arr, mask = tile(sceneid,  tile_x, tile_y, tile_z, indexes=bands, **kwargs)
+
+    ctx = {}
+    for bdx, b in enumerate(bands_names):
+        ctx['b{}'.format(b)] = arr[bdx]
+
+    return np.array([np.nan_to_num(ne.evaluate(bloc.strip(), local_dict=ctx)) for bloc in rgb]), mask

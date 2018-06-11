@@ -1,3 +1,44 @@
+1.0a7 (2018-05-14)
+------------------
+- Support for additional CBERS instruments (fredliporace)
+
+1.0a6 (2018-03-29)
+------------------
+- Fixes sentinel-2 band 8A regex bug in `rio_tiler.utils.expression`
+
+1.0a5 (2018-03-26)
+------------------
+- adds DatasetReader input option for utils.tile_read (do not close the dataset on each read)
+
+:Breacking Changes:
+- `utils.tile_band_worker` renamed to `utils.tile_read`
+- `main.tile` **rgb** option renamed **indexes**
+- `sentinel2.tile`, `landsat8.tile`,  `cbers.tile` **rgb** option renamed **bands**
+- `main.tile` default nodata mask is handled by rasterio
+
+1.0a4 (2018-03-07)
+------------------
+- adds utils.b64_encode_img function to encode an image object into a base64 string
+- add tiles profiles (jpeg, png, webp) based on https://github.com/mapnik/mapnik/wiki/Image-IO#default-output-details
+
+:Breacking Changes:
+- Refactor `rio_tiler.utils.array_to_img` to return PIL image object
+
+1.0a3 (2018-02-05)
+------------------
+- only using `read_masks` for mask creation when it's needed.
+
+1.0a2 (2018-02-05)
+------------------
+- add "expression" utility function
+- better nodata/mask/alpha band definition and support
+
+:Breacking Changes:
+- tile functions now return an associated mask (Landsat, Sentinel, CBERS, main)
+- remove nodata support in utils.image_to_array function
+- add mask support in utils.image_to_array function
+- utils.tile_band_worker will always return a (Band, Width, Height) array (e.g 1x256x256 or 3x256x256)
+
 
 1.0a1 (2018-01-04)
 ------------------

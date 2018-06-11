@@ -12,15 +12,11 @@ with open('rio_tiler/__init__.py') as f:
             continue
 
 
-def read(fname):
-    return open(os.path.join(os.path.dirname(__file__), fname)).read()
-
-
 with open('README.rst') as f:
     readme = f.read()
 
 # Runtime requirements.
-inst_reqs = ["numpy", "Pillow", "mercantile", "boto3",
+inst_reqs = ["numpy", "numexpr", "Pillow", "mercantile", "boto3",
              "rasterio[s3]>=1.0a12", "rio-toa", "rio-pansharpen"]
 
 extra_reqs = {

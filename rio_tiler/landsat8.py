@@ -84,7 +84,7 @@ def metadata(sceneid, pmin=2, pmax=98):
     return info
 
 
-def tile(sceneid, tile_x, tile_y, tile_z, rgb=(4, 3, 2), tilesize=256, pan=False):
+def tile(sceneid, tile_x, tile_y, tile_z, bands=(4, 3, 2), tilesize=256, pan=False):
     """Create mercator tile from Landsat-8 data.
 
     Attributes
@@ -99,7 +99,7 @@ def tile(sceneid, tile_x, tile_y, tile_z, rgb=(4, 3, 2), tilesize=256, pan=False
         Mercator tile Y index.
     tile_z : int
         Mercator tile ZOOM level.
-    rgb : tuple, int, optional (default: (4, 3, 2))
+    bands : tuple, int, optional (default: (4, 3, 2))
         Bands index for the RGB combination.
     tilesize : int, optional (default: 256)
         Output image size.
@@ -108,11 +108,12 @@ def tile(sceneid, tile_x, tile_y, tile_z, rgb=(4, 3, 2), tilesize=256, pan=False
 
     Returns
     -------
-    out : numpy ndarray
+    data : numpy ndarray
+    mask: numpy array
     """
 
-    if not isinstance(rgb, tuple):
-        rgb = tuple((rgb, ))
+    if not isinstance(bands, tuple):
+        bands = tuple((bands, ))
 
     scene_params = utils.landsat_parse_scene_id(sceneid)
     meta_data = utils.landsat_get_mtl(sceneid).get('L1_METADATA_FILE')
@@ -130,26 +131,28 @@ def tile(sceneid, tile_x, tile_y, tile_z, rgb=(4, 3, 2), tilesize=256, pan=False
     tile_bounds = mercantile.xy_bounds(mercator_tile)
 
     ms_tile_size = int(tilesize / 2) if pan else tilesize
-    addresses = ['{}_B{}.TIF'.format(landsat_address, band) for band in rgb]
+    addresses = ['{}_B{}.TIF'.format(landsat_address, band) for band in bands]
 
-    _tiler = partial(utils.tile_band_worker, bounds=tile_bounds, tilesize=ms_tile_size)
+    _tiler = partial(utils.tile_read, bounds=tile_bounds, tilesize=ms_tile_size, nodata=0)
     with futures.ThreadPoolExecutor(max_workers=3) as executor:
-        out = np.stack(list(executor.map(_tiler, addresses)))
+        data, masks = zip(*list(executor.map(_tiler, addresses)))
+        data = np.concatenate(data)
+        mask = np.all(masks, axis=0).astype(np.uint8) * 255
 
         if pan:
             pan_address = '{}_B8.TIF'.format(landsat_address)
-            matrix_pan = utils.tile_band_worker(pan_address, tile_bounds, tilesize)
+            matrix_pan, mask = utils.tile_read(pan_address, tile_bounds, tilesize, nodata=0)
 
             w, s, e, n = tile_bounds
             pan_transform = transform.from_bounds(w, s, e, n, tilesize, tilesize)
             vis_transform = pan_transform * Affine.scale(2.)
-            out = pansharpen(out, vis_transform, matrix_pan, pan_transform,
-                             np.int16, 'EPSG:3857', 'EPSG:3857', 0.2,
-                             method='Brovey', src_nodata=0)
+            data = pansharpen(data, vis_transform, matrix_pan, pan_transform,
+                              np.int16, 'EPSG:3857', 'EPSG:3857', 0.2,
+                              method='Brovey', src_nodata=0)
 
         sun_elev = meta_data['IMAGE_ATTRIBUTES']['SUN_ELEVATION']
 
-        for bdx, band in enumerate(rgb):
+        for bdx, band in enumerate(bands):
             if int(band) > 9:  # TIRS
                 multi_rad = meta_data['RADIOMETRIC_RESCALING'].get(
                     'RADIANCE_MULT_BAND_{}'.format(band))
@@ -163,8 +166,8 @@ def tile(sceneid, tile_x, tile_y, tile_z, rgb=(4, 3, 2), tilesize=256, pan=False
                 k2 = meta_data['TIRS_THERMAL_CONSTANTS'].get(
                     'K2_CONSTANT_BAND_{}'.format(band))
 
-                out[bdx] = brightness_temp.brightness_temp(
-                    out[bdx], multi_rad, add_rad, k1, k2)
+                data[bdx] = brightness_temp.brightness_temp(
+                    data[bdx], multi_rad, add_rad, k1, k2)
 
             else:
                 multi_reflect = meta_data['RADIOMETRIC_RESCALING'].get(
@@ -173,7 +176,7 @@ def tile(sceneid, tile_x, tile_y, tile_z, rgb=(4, 3, 2), tilesize=256, pan=False
                 add_reflect = meta_data['RADIOMETRIC_RESCALING'].get(
                     'REFLECTANCE_ADD_BAND_{}'.format(band))
 
-                out[bdx] = 10000 * reflectance.reflectance(
-                    out[bdx], multi_reflect, add_reflect, sun_elev)
+                data[bdx] = 10000 * reflectance.reflectance(
+                    data[bdx], multi_reflect, add_reflect, sun_elev)
 
-        return out
+        return data, mask

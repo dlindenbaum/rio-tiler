@@ -9,11 +9,11 @@ from rio_tiler.errors import TileOutsideBounds
 
 
 def bounds(address):
-    """Retrieve image bounds.
+    """
+    Retrieve image bounds.
 
     Attributes
     ----------
-
     address : str
         file url.
 
@@ -21,8 +21,8 @@ def bounds(address):
     -------
     out : dict
         dictionary with image bounds.
-    """
 
+    """
     with rasterio.open(address) as src:
         wgs_bounds = transform_bounds(
             *[src.crs, 'epsg:4326'] + list(src.bounds), densify_pts=21)
@@ -30,12 +30,12 @@ def bounds(address):
     return {'url': address, 'bounds': list(wgs_bounds)}
 
 
-def tile(address, tile_x, tile_y, tile_z, rgb=None,  tilesize=256):
-    """Create mercator tile from any images.
+def tile(address, tile_x, tile_y, tile_z, indexes=None, tilesize=256, nodata=None, alpha=None):
+    """
+    Create mercator tile from any images.
 
     Attributes
     ----------
-
     address : str
         file url.
     tile_x : int
@@ -44,30 +44,32 @@ def tile(address, tile_x, tile_y, tile_z, rgb=None,  tilesize=256):
         Mercator tile Y index.
     tile_z : int
         Mercator tile ZOOM level.
-    rgb : tuple, int, optional (default: (1, 2, 3))
-        Bands index for the RGB combination.
+    indexes : tuple, int, optional (default: (1, 2, 3))
+        Bands indexes for the RGB combination.
     tilesize : int, optional (default: 256)
         Output image size.
+    nodata: int or float, optional
+        Overwrite nodata value for mask creation.
+    alpha: int, optional
+        Overwrite alpha band index for mask creation.
 
     Returns
     -------
-    out : numpy ndarray
-    """
+    data : numpy ndarray
+    mask: numpy array
 
+    """
     with rasterio.open(address) as src:
         wgs_bounds = transform_bounds(
             *[src.crs, 'epsg:4326'] + list(src.bounds), densify_pts=21)
-        nodata = src.nodata
-        if not rgb:
-            rgb = src.indexes
 
-    if not utils.tile_exists(wgs_bounds, tile_z, tile_x, tile_y):
-        raise TileOutsideBounds(
-            'Tile {}/{}/{} is outside image bounds'.format(
-                tile_z, tile_x, tile_y))
+        indexes = indexes if indexes is not None else src.indexes
 
-    mercator_tile = mercantile.Tile(x=tile_x, y=tile_y, z=tile_z)
-    tile_bounds = mercantile.xy_bounds(mercator_tile)
-    out = utils.tile_band_worker(address, tile_bounds, tilesize, indexes=rgb, nodata=nodata)
+        if not utils.tile_exists(wgs_bounds, tile_z, tile_x, tile_y):
+            raise TileOutsideBounds(
+                'Tile {}/{}/{} is outside image bounds'.format(tile_z, tile_x, tile_y))
 
-    return out
+        mercator_tile = mercantile.Tile(x=tile_x, y=tile_y, z=tile_z)
+        tile_bounds = mercantile.xy_bounds(mercator_tile)
+        return utils.tile_read(src, tile_bounds, tilesize, indexes=indexes,
+                               nodata=nodata, alpha=alpha)

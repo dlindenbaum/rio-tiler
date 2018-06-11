@@ -33,7 +33,8 @@ def bounds(sceneid):
     scene_params = utils.cbers_parse_scene_id(sceneid)
     cbers_address = '{}/{}'.format(CBERS_BUCKET, scene_params['key'])
 
-    with rasterio.open('{}/{}_BAND6.tif'.format(cbers_address, sceneid)) as src:
+    with rasterio.open('{}/{}_BAND{}.tif'.format(cbers_address, sceneid,
+                                                 scene_params['reference_band'])) as src:
         wgs_bounds = transform_bounds(
             *[src.crs, 'epsg:4326'] + list(src.bounds), densify_pts=21)
 
@@ -65,13 +66,14 @@ def metadata(sceneid, pmin=2, pmax=98):
     scene_params = utils.cbers_parse_scene_id(sceneid)
     cbers_address = '{}/{}'.format(CBERS_BUCKET, scene_params['key'])
 
-    with rasterio.open('{}/{}_BAND6.tif'.format(cbers_address, sceneid)) as src:
+    with rasterio.open('{}/{}_BAND{}.tif'.format(cbers_address, sceneid,
+                                                 scene_params['reference_band'])) as src:
         wgs_bounds = transform_bounds(
             *[src.crs, 'epsg:4326'] + list(src.bounds), densify_pts=21)
 
     info = {'sceneid': sceneid, 'bounds': list(wgs_bounds)}
 
-    bands = ['5', '6', '7', '8']
+    bands = scene_params['bands']
     addresses = ['{}/{}_BAND{}.tif'.format(cbers_address, sceneid, band) for band in bands]
     _min_max_worker = partial(utils.band_min_max_worker, pmin=pmin, pmax=pmax)
     with futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -81,7 +83,7 @@ def metadata(sceneid, pmin=2, pmax=98):
     return info
 
 
-def tile(sceneid, tile_x, tile_y, tile_z, rgb=(7, 6, 5), tilesize=256):
+def tile(sceneid, tile_x, tile_y, tile_z, bands=None, tilesize=256):
     """Create mercator tile from CBERS data.
 
     Attributes
@@ -95,23 +97,30 @@ def tile(sceneid, tile_x, tile_y, tile_z, rgb=(7, 6, 5), tilesize=256):
         Mercator tile Y index.
     tile_z : int
         Mercator tile ZOOM level.
-    rgb : tuple, int, optional (default: ('5', '6', '7'))
-        Bands index for the RGB combination.
+    bands : tuple, int, optional (default: None)
+        Bands index for the RGB combination. If None uses default
+        defined for the instrument
     tilesize : int, optional (default: 256)
         Output image size.
 
     Returns
     -------
-    out : numpy ndarray
+    data : numpy ndarray
+    mask: numpy array
     """
 
-    if not isinstance(rgb, tuple):
-        rgb = tuple((rgb, ))
-
     scene_params = utils.cbers_parse_scene_id(sceneid)
+
+    if not bands:
+        bands = scene_params['rgb']
+    
+    if not isinstance(bands, tuple):
+        bands = tuple((bands, ))
+
     cbers_address = '{}/{}'.format(CBERS_BUCKET, scene_params['key'])
 
-    with rasterio.open('{}/{}_BAND6.tif'.format(cbers_address, sceneid)) as src:
+    with rasterio.open('{}/{}_BAND{}.tif'.format(cbers_address, sceneid,
+                                                 scene_params['reference_band'])) as src:
         wgs_bounds = transform_bounds(
             *[src.crs, 'epsg:4326'] + list(src.bounds), densify_pts=21)
 
@@ -122,10 +131,11 @@ def tile(sceneid, tile_x, tile_y, tile_z, rgb=(7, 6, 5), tilesize=256):
     mercator_tile = mercantile.Tile(x=tile_x, y=tile_y, z=tile_z)
     tile_bounds = mercantile.xy_bounds(mercator_tile)
 
-    addresses = ['{}/{}_BAND{}.tif'.format(cbers_address, sceneid, band) for band in rgb]
+    addresses = ['{}/{}_BAND{}.tif'.format(cbers_address, sceneid, band) for band in bands]
 
-    _tiler = partial(utils.tile_band_worker, bounds=tile_bounds, tilesize=tilesize)
+    _tiler = partial(utils.tile_read, bounds=tile_bounds, tilesize=tilesize, nodata=0)
     with futures.ThreadPoolExecutor(max_workers=3) as executor:
-        out = np.stack(executor.map(_tiler, addresses))
+        data, masks = zip(*list(executor.map(_tiler, addresses)))
+        mask = np.all(masks, axis=0).astype(np.uint8) * 255
 
-    return out
+    return np.concatenate(data), mask
