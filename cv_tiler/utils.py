@@ -6,6 +6,7 @@ import rasterio
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 from rasterio.io import DatasetReader
+from rasterio.warp import transform_bounds
 from rio_tiler.errors import (RioTilerError,
                               InvalidFormat,
                               InvalidLandsatSceneId,
@@ -13,6 +14,7 @@ from rio_tiler.errors import (RioTilerError,
                               InvalidCBERSSceneId)
 
 from shapely.geometry import box
+import statistics
 
 from PIL import Image
 
@@ -56,13 +58,12 @@ def utm_isNorthern(latitude):
         return "N"
 
 
-def calculate_UTM_EPSG(latitude, longitude, epsgStart={"N":"EPSG:326", "S":"EPSG:327"}):
+def calculate_UTM_EPSG(coords, epsgStart={"N":"EPSG:326", "S":"EPSG:327"}):
     """Calculate UTM North/South from Latitude
 
     Attributes:
     ___________
-    latitude: float, latitude (Deg.decimal degrees)
-    longitude: float, of longitude (Degrees.decimal degrees)
+    coords: list, [longitude, latitude] or [min_longitude, min_latitude, max_lognitude, max_latitude
     epsgStart: dict, dictionary for precursor for UTM Zone EPSG (Default is WGS84)
 
     Returns:
@@ -70,11 +71,18 @@ def calculate_UTM_EPSG(latitude, longitude, epsgStart={"N":"EPSG:326", "S":"EPSG
     out: str
         returns UTM Zone EPSG
     """
+    if len(coords) == 2:
+        longitude, latitude = coords
+    elif len(coords) == 4:
+        longitude = statistics.mean([coords[0], coords[2]])
+        latitude = statistics.mean([coords[1], coords[3]])
 
-    utmZone = utm_getZone(longitude)
-    utmDirection = utm_isNorthern(latitude)
+    utm_zone = utm_getZone(longitude)
 
-    return "{}{}".format(epsgStart[utmDirection], str(utmZone))
+    utm_direction = utm_isNorthern(latitude)
+
+
+    return "{}{}".format(epsgStart[utm_direction], str(utm_zone))
 
 def tile_read_utm(source, bounds, tilesize, indexes=[1], nodata=None, alpha=None, dst_crs='EPSG:3857'):
     """Read data and mask
@@ -175,12 +183,40 @@ def tile_exists_utm(boundsSrc, boundsTile):
     """
 
 
-    boundsSrcBox = box(boundsSrc)
-    boundsTileBox = box(boundsTile)
+    boundsSrcBox = box(*boundsSrc)
+    boundsTileBox = box(*boundsTile)
 
     return boundsSrcBox.intersects(boundsTileBox)
 
 
+
+
+def get_wgs84_bounds(source):
+    if isinstance(source, DatasetReader):
+        src = source
+
+        wgs_bounds = transform_bounds(*[src.crs, 'epsg:4326'] + list(src.bounds), densify_pts=21)
+
+    else:
+        with rasterio.open(source) as src:
+
+            wgs_bounds = transform_bounds(*[src.crs, 'epsg:4326'] + list(src.bounds), densify_pts=21)
+
+    return wgs_bounds
+
+
+def get_utm_bounds(source, utm_EPSG):
+    if isinstance(source, DatasetReader):
+        src = source
+
+        utm_bounds = transform_bounds(*[src.crs, utm_EPSG] + list(src.bounds), densify_pts=21)
+
+    else:
+        with rasterio.open(source) as src:
+
+            utm_bounds = transform_bounds(*[src.crs, utm_EPSG] + list(src.bounds), densify_pts=21)
+
+    return utm_bounds
 
 
 

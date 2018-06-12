@@ -1,12 +1,12 @@
 import rasterio
 from rasterio.warp import transform_bounds
 from rasterio.io import DatasetReader
-
-from rio_tiler import utils as rio_utils
+import statistics
+import math
+import random
 from rio_tiler.errors import TileOutsideBounds
-from rio_tiler import main as rio_main
-from cv_Tiler import utils as cv_utils
-
+from cv_tiler import utils
+import numpy as np
 
 
 
@@ -45,17 +45,17 @@ def tile_utm_source(src, ll_x, ll_y, ur_x, ur_y, indexes=None, tilesize=256, nod
 
     indexes = indexes if indexes is not None else src.indexes
     tile_bounds = (ll_x, ll_y, ur_x, ur_y)
-    if not cv_utils.tile_exists_utm(wgs_bounds, tile_bounds):
+    if not utils.tile_exists_utm(wgs_bounds, tile_bounds):
         raise TileOutsideBounds(
             'Tile {}/{}/{}/{} is outside image bounds'.format(ll_x, ll_y, ur_x, ur_y))
 
-    return cv_utils.tile_read_utm(src,
-                                  tile_bounds,
-                                  tilesize,
-                                  indexes=indexes,
-                                  nodata=nodata,
-                                  alpha=alpha,
-                                  dst_crs=dst_crs)
+    return utils.tile_read_utm(src,
+                               tile_bounds,
+                               tilesize,
+                               indexes=indexes,
+                               nodata=nodata,
+                               alpha=alpha,
+                               dst_crs=dst_crs)
 
 
 
@@ -134,6 +134,75 @@ def get_chip(address, ll_x, ll_y, xres, yres, downSampleRate):
     :return:
 
     """
+
+def calculate_anchor_points(utm_bounds, stride_size_meters=400):
+    min_x = math.floor(utm_bounds[0])
+    min_y = math.floor(utm_bounds[1])
+    max_x = math.ceil(utm_bounds[2])
+    max_y = math.ceil(utm_bounds[3])
+
+    anchor_point_list = []
+    for x in np.arange(min_x, max_x, stride_size_meters):
+        for y in np.arange(min_y, max_y, stride_size_meters):
+            anchor_point_list.append([x, y])
+
+
+    return anchor_point_list
+
+
+def calculate_cells(anchor_point_list, cell_size_meters):
+    """ calculate Cells for splitting based on anchor points
+
+    :param anchor_point_list:
+    :param cell_size_meters:
+    :return:
+    cells_list [(minx, miny, maxx, maxy),
+                ...]
+    """
+    cells_list = []
+    for anchor_point in anchor_point_list:
+        cells_list.append([anchor_point[0], anchor_point[1], anchor_point[0]+cell_size_meters, anchor_point[1]+cell_size_meters])
+
+    return cells_list
+
+def calculate_analysis_grid(utm_bounds, stride_size_meters=300, cell_size_meters=400):
+    anchor_point_list = calculate_anchor_points(utm_bounds, stride_size_meters=stride_size_meters)
+
+    cells_list = calculate_cells(anchor_point_list, cell_size_meters)
+
+    return cells_list
+
+
+
+
+
+if __name__ == '__main__':
+
+    utmX, utmY = 658029, 4006947
+    ll_x = utmX
+    ur_x = utmX + 500
+    ll_y = utmY
+    ur_y = utmY + 500
+    stride_size_meters = 300
+    cell_size_meters = 400
+    tile_size_pixels = 1600
+    spacenetPath = "s3://spacenet-dataset/AOI_2_Vegas/srcData/rasterData/AOI_2_Vegas_MUL-PanSharpen_Cloud.tif"
+    address = spacenetPath
+
+    with rasterio.open(address) as src:
+
+        wgs_bounds = utils.get_wgs84_bounds(src)
+        utm_EPSG = utils.calculate_UTM_EPSG(wgs_bounds)
+        utm_bounds = utils.get_utm_bounds(src, utm_EPSG)
+
+        cells_list = calculate_analysis_grid(utm_bounds, stride_size_meters=stride_size_meters, cell_size_meters=cell_size_meters)
+
+        random_cell = random.choice(cells_list)
+        ll_x, ll_y, ur_x, ur_y = random_cell
+        tile = tile_utm(src, ll_x, ll_y, ur_x, ur_y, indexes=None, tilesize=tile_size_pixels, nodata=None, alpha=None,
+                 dst_crs=utm_EPSG)
+
+
 
 
 
